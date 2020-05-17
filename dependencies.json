@@ -1,0 +1,14 @@
+[
+  {
+    "ParameterKey": "UdaApp",
+    "ParameterValue": "Zesus"
+  },
+  {
+    "ParameterKey": "InstanceType",
+    "ParameterValue": "t3.small"
+  }
+
+]
+
+
+

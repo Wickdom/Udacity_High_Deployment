@@ -1,0 +1,315 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Yaw Boateng Kessie
+
+Parameters:
+  UdaApp:
+    Description: An environment name that will be prefixed to resources
+    Type: String
+    Default: Hades
+    AllowedValues:
+      - Hades  # Developer environment for application developments
+      - Poseidon #Demo and QA environment for developers, UX, QA tester
+      - Zesus    # Production evironment
+
+  InstanceType:
+    Description: EC2 instance selection
+    Type: String
+    Default: t3.small
+    AllowedValues:
+      - t3.small
+      - t3.micro
+      - t3.medium
+      - t3.large
+      - t3.xlarge
+      - t3.2xlarge
+
+Resources:
+
+#-----------------------------------------------------------------------
+# IAM Configuration
+#-----------------------------------------------------------------------
+  S3ReadOnlyEC2:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName:
+        !Sub ${UdaApp}-Role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+
+  RolePolicies:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: AmazonS3ReadOnlyAccess
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:Get*
+              - s3:List*
+            Resource:
+              - arn:aws:s3:::udacity-demo-1
+              - arn:aws:s3:::udacity-demo-1/*
+      Roles:
+        - Ref: S3ReadOnlyEC2
+
+  ProfileWithRolesForOurApp:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles:
+        - Ref: S3ReadOnlyEC2
+
+
+
+#-----------------------------------------------------------------------
+#Configuring instances with autoscaling
+#-----------------------------------------------------------------------
+  UdaAppLaunchconfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          apt-get update -y
+          apt-get install unzip awscli -y
+          apt-get install apache2 -y
+          systemctl start apache2.service
+          cd /var/www/html
+          aws s3 cp s3://udacity-demo-1/udacity.zip .
+          unzip -o udacity.zip
+      ImageId: ami-003634241a8fcdec0
+      IamInstanceProfile: !Ref ProfileWithRolesForOurApp
+      InstanceType: !Ref 'InstanceType'
+      KeyName: Udagramkeypair
+      BlockDeviceMappings:
+        - DeviceName: "/dev/sdk"
+          Ebs:
+            VolumeSize: '10'
+            DeleteOnTermination: true
+            VolumeType: 'gp2'
+      SecurityGroups:
+        - Ref: "UdaAppSG"
+
+
+  UdaAppASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      LaunchConfigurationName: !Ref UdaAppLaunchconfig
+      MaxSize: 12
+      MinSize: 4
+      DesiredCapacity: 4
+      VPCZoneIdentifier:
+        - Fn::ImportValue: !Sub ${UdaApp}-Privsubnet1
+        - Fn::ImportValue: !Sub ${UdaApp}-Privsubnet2
+      TargetGroupARNs:
+        - Ref: UdaAppTargetG
+      Tags:
+        - Key: Name
+          Value: UdaAppASG
+          PropagateAtLaunch: True
+    UpdatePolicy:
+      AutoScalingReplacingUpdate:
+        WillReplace: True
+
+#------------------------------------------------------------------------
+# Configuring the Security Groups
+#------------------------------------------------------------------------
+  UdaAppSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: This allows http and ssh
+      VpcId:
+        Fn::ImportValue: !Sub "${UdaApp}-VPCID"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp:
+            Fn::ImportValue: !Sub ${UdaApp}-EC2BastionHost1-CIDR
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp:
+             Fn::ImportValue: !Sub ${UdaApp}-EC2BastionHost2-CIDR
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 0
+          ToPort: 65535
+          CidrIp: 0.0.0.0/0
+
+
+  UdaAppLBSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow http traffic to and from load balancer
+      VpcId:
+        Fn::ImportValue: !Sub "${UdaApp}-VPCID"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "${UdaApp}-LBSG"
+#------------------------------------------------------------------------
+# Configuring the Load Balancer and TargetGroup
+#------------------------------------------------------------------------
+  UdaAppLB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      SecurityGroups:
+        - Ref: UdaAppLBSG
+      Subnets:
+        - Fn::ImportValue: !Sub ${UdaApp}-Pubsubnet1
+        - Fn::ImportValue: !Sub ${UdaApp}-Pubsubnet2
+
+
+  UdaAppTargetG:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 8
+      HealthyThresholdCount: 2
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 5
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: "${UdaApp}-VPCID"
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref UdaAppTargetG
+      LoadBalancerArn: !Ref UdaAppLB
+      Port: 80
+      Protocol: HTTP
+
+  ListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref 'UdaAppTargetG'
+      Conditions:
+        - Field: path-pattern
+          Values: [/]
+      ListenerArn: !Ref 'Listener'
+      Priority: 1
+
+#--------------------------------------------------------------------------
+#Autoscaling Policies
+#-----------------------------------------------------------------------
+
+  UdaAppScaleUp:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref UdaAppASG
+      Cooldown: 60
+      ScalingAdjustment: 1
+
+
+  UdaAppScaleDown:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref UdaAppASG
+      Cooldown: 300
+      ScalingAdjustment: -1
+
+#----------------------------------------------------------------------
+#CloudWatch Configuration
+#-----------------------------------------------------------------------
+
+  UdaAppCPUHighAlarm:
+    Type: "AWS::CloudWatch::Alarm"
+    Properties:
+      AlarmName: "UdaAppCPUUsageHigh"
+      AlarmDescription: "CPU usage is greater than 80% for 5 minutes"
+      MetricName: "CPUUtilization"
+      Namespace: "AWS/EC2"
+      Statistic: "Average"
+      Period: "300"
+      EvaluationPeriods: "1"
+      Threshold: "80"
+      ComparisonOperator: "GreaterThanThreshold"
+      AlarmActions:
+        - Ref: "UdaAppScaleUp"
+      Dimensions:
+        - Name: "AutoScalingGroupName"
+          Value:
+            Ref: "UdaAppASG"
+
+  UdaAppCPULowAlarm:
+    Type: "AWS::CloudWatch::Alarm"
+    Properties:
+      AlarmName: "UdaAppCPUUsageLow"
+      AlarmDescription: "CPU usage is less than 25% for 5 minutes"
+      MetricName: "CPUUtilization"
+      Namespace: "AWS/EC2"
+      Statistic: "Average"
+      Period: "300"
+      EvaluationPeriods: "1"
+      Threshold: "25"
+      ComparisonOperator: "GreaterThanThreshold"
+      AlarmActions:
+        - Ref: "UdaAppScaleDown"
+      Dimensions:
+        - Name: "AutoScalingGroupName"
+          Value:
+            Ref: "UdaAppASG"
+
+
+
+#----------------------------------------------------------------------
+# Output
+#----------------------------------------------------------------------
+Outputs:
+  Website:
+    Description: The Public DNS for the EC2 Instance
+    Value: !Join ["", ["http://", !GetAtt [UdaAppLB, DNSName]]]
+
+  CPUHighAlarm:
+    Description: "CloudWatch to send alarms when EC2 CPU is High"
+    Value: !Ref "UdaAppCPUHighAlarm"
+
+  CPULowAlarm:
+    Description: "CloudWatch to send alarms when EC2 CPU is Low"
+    Value: !Ref "UdaAppCPULowAlarm"
+
+  UdaAppASG:
+    Description: "Group ID of Auto Scaling Group Reference ID"
+    Value: !Ref "UdaAppASG"
+
+  ScaleUp:
+    Description: "Policy ID of Auto Scaling Up"
+    Value: !Ref "UdaAppScaleUp"
+
+  ScaleDown:
+    Description: "Policy ID of Auto Scaling Down"
+    Value: !Ref "UdaAppScaleDown"

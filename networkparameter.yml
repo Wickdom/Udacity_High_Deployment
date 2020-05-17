@@ -1,0 +1,307 @@
+Description: >
+  Yaw Boateng Kessie
+
+Parameters:
+  UdaApp:
+    Description: An environment name that will be prefixed to resources
+    Type: String
+    Default: Hades
+    AllowedValues:
+      - Hades  # Developer environment for application developments
+      - Poseidon #Demo and QA environment for developers, UX, QA tester
+      - Zesus    # Production evironment
+
+  InstanceType:
+    Description: EC2 instance selection
+    Type: String
+    Default: t3.small
+    AllowedValues:
+      - t3.small
+      - t3.micro
+      - t3.medium
+      - t3.large
+      - t3.xlarge
+      - t3.2xlarge
+
+Mappings:
+  Configuration:
+    VPC:
+      CIDR: 10.0.0.0/16
+    Pubnet1:
+      CIDR: 10.0.0.0/24
+    Pubnet2:
+      CIDR: 10.0.1.0/24
+    Privnet1:
+      CIDR: 10.0.2.0/24
+    Privnet2:
+      CIDR: 10.0.3.0/24
+
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      CidrBlock: !FindInMap
+        - Configuration
+        - VPC
+        - CIDR
+      Tags:
+        - Key: Name
+          Value: !Ref UdaApp
+        - Key: Interface
+          Value: Public Interface
+#-----------------------------------------------------------------------
+# Public_Subnets
+#-----------------------------------------------------------------------
+  Pubsubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      VpcId: !Ref VPC
+      MapPublicIpOnLaunch: true
+      CidrBlock: !FindInMap
+        - Configuration
+        - Pubnet1
+        - CIDR
+      Tags:
+        - Key: Interface
+          Value: Public_subnet
+        - Key: Name
+          Value: !Sub ${UdaApp}-Public-Subnet-(AZ1)
+
+  Pubsubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [ 1, !GetAZs '' ]
+      VpcId: !Ref VPC
+      MapPublicIpOnLaunch: true
+      CidrBlock: !FindInMap
+        - Configuration
+        - Pubnet2
+        - CIDR
+      Tags:
+        - Key: Interface
+          Value: Public_subnet
+        - Key: Name
+          Value: !Sub ${UdaApp}-Public-Subnet-(AZ2)
+
+#-----------------------------------------------------------------------
+# Private_Subnets
+#-----------------------------------------------------------------------
+  Privsubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      VpcId: !Ref VPC
+      MapPublicIpOnLaunch: false
+      CidrBlock: !FindInMap
+        - Configuration
+        - Privnet1
+        - CIDR
+      Tags:
+        - Key: Interface
+          Value: Private_subnet
+        - Key: Name
+          Value: !Sub ${UdaApp}-Private-Subnet-(AZ1)
+
+  Privsubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [ 1, !GetAZs '' ]
+      VpcId: !Ref VPC
+      MapPublicIpOnLaunch: false
+      CidrBlock: !FindInMap
+        - Configuration
+        - Privnet2
+        - CIDR
+      Tags:
+        - Key: Interface
+          Value: Private_subnet
+        - Key: Name
+          Value: !Sub ${UdaApp}-Private-Subnet-(AZ2)
+#-----------------------------------------------------------------------
+# Internet Gateway
+#-----------------------------------------------------------------------
+
+  InternetGW:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Interface
+          Value: Outside IGW
+        - Key: Name
+          Value: !Ref UdaApp
+
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGW
+#-----------------------------------------------------------------------
+# Network Address Translation NAT
+#-----------------------------------------------------------------------
+  NatGW1:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt EIP1.AllocationId
+      SubnetId: !Ref Pubsubnet1
+
+  NatGW2:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt EIP2.AllocationId
+      SubnetId: !Ref Pubsubnet2
+#-----------------------------------------------------------------------
+# Elastic IPs
+#-----------------------------------------------------------------------
+  EIP1:
+    Type: AWS::EC2::EIP
+    DependsOn: GatewayAttachment
+    Properties:
+      Domain: vpc
+
+  EIP2:
+    Type: AWS::EC2::EIP
+    DependsOn: GatewayAttachment
+    Properties:
+      Domain: vpc
+
+#Routing
+#-----------------------------------------------------------------------
+# Public Route Table and Public Route Subnet
+#-----------------------------------------------------------------------
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${UdaApp}-Public-Routes
+
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGW
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref Pubsubnet1
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref Pubsubnet2
+
+
+#-----------------------------------------------------------------------
+# Private Route Table and Private Route Subnet
+#------------------------------------------------------------------------
+  PrivateRouteTable0:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Interface
+          Value: Private_subnet
+        - Key: Name
+          Value: !Sub ${UdaApp}-Private-RT-1
+
+  DefaultPrivateRoute0:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable0
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGW1
+
+  PrivateSubnetRTAssociation0:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref Privsubnet1
+      RouteTableId: !Ref PrivateRouteTable0
+
+  PrivateRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Interface
+          Value: Private_subnet
+        - Key: Name
+          Value: !Sub ${UdaApp}-Private-RT-2
+
+  DeafultPrivateRoute1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGW2
+
+  PrivateSubnetRTAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref Privsubnet2
+      RouteTableId: !Ref PrivateRouteTable1
+
+
+
+#-------------------------------------------------------------------------
+# OutPuts
+#-------------------------------------------------------------------------
+
+
+Outputs:
+  VPCID:
+    Description: The VPCId of VPC
+    Value: !Ref VPC
+    Export:
+      Name: !Sub ${UdaApp}-VPCID
+
+  PublicSubnets:
+    Description: A list of the public subnets
+    Value: !Join [ ",", [ !Ref Pubsubnet1, !Ref Pubsubnet2 ]]
+    Export:
+      Name: !Sub ${UdaApp}-Pubsubnet
+
+  PrivateSubnets:
+    Description: A list of the private subnets
+    Value: !Join [ ",", [ !Ref Privsubnet1, !Ref Privsubnet2 ]]
+    Export:
+      Name: !Sub ${UdaApp}-Privsubnet
+
+  PublicSubnetID1:
+    Description: SubnetId of public subnet 1 of (AZ0)
+    Value: !Ref Pubsubnet1
+    Export:
+      Name: !Sub ${UdaApp}-Pubsubnet1
+
+  PublicSubnetID2:
+    Description: SubnetId of public subnet 2 of (AZ1)
+    Value: !Ref Pubsubnet2
+    Export:
+      Name: !Sub ${UdaApp}-Pubsubnet2
+
+  PrivateSubnetID1:
+    Description: SubnetId of Private subnet 1 of (AZ0)
+    Value: !Ref Privsubnet1
+    Export:
+      Name: !Sub ${UdaApp}-Privsubnet1
+
+  PrivateSubnetID2:
+    Description: SubnetId of Private subnet 2 of (AZ0)
+    Value: !Ref Privsubnet2
+    Export:
+      Name: !Sub ${UdaApp}-Privsubnet2
+
+  SecurityGroupDefault:
+    Description: The ID of DefaultSecurityGroup
+    Value: !GetAtt VPC.DefaultSecurityGroup
+    Export:
+      Name: !Sub ${UdaApp}-SG

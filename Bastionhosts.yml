@@ -1,0 +1,258 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Yaw Boateng Kessie
+
+Parameters:
+  UdaApp:
+    Description: An environment name that will be prefixed to resources
+    Type: String
+    Default: Hades
+    AllowedValues:
+      - Hades  # Developer environment for application developments
+      - Poseidon #Demo and QA environment for developers, UX, QA tester
+      - Zesus    # Production evironment
+
+  RemoteAccess:
+    Description: CIDR IP range that is permitted to access the bastions. We recommend
+      that you set this value to a trusted IP range.
+    Type: String
+    Default: 0.0.0.0/16
+
+  BastionSSH:
+    Description: KeyName to access bastion host
+    Type: "AWS::EC2::KeyPair::KeyName"
+    Default: jumpbox
+
+  SSHStore:
+    Description: S3 service that stored the ssh keys for Bastion host
+    Type: String
+    Default: bastionkeys
+
+
+Mappings:
+  DefaultConfiguration:
+    MachineConfiguration:
+      EC2InstanceType: t3.small
+
+#------------------------------------------------------------------
+# IAM configuration
+#------------------------------------------------------------------
+Resources:
+  BastionIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+
+  BastionIamPolicies:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: fullAccess
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: "s3:*"
+            Resource: "*"
+      Roles:
+        - !Ref BastionIamRole
+
+
+  BastionIamInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles:
+        - !Ref BastionIamRole
+
+
+
+#------------------------------------------------------------------
+# Bastion Host security Group
+#-----------------------------------------------------------------
+  BastionSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SG to access to bastion host
+      VpcId:
+        Fn::ImportValue: !Sub "${UdaApp}-VPCID"
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: "22"
+          ToPort: "22"
+          CidrIp: !Sub ${RemoteAccess}
+
+
+#---------------------------------------------
+#  EC2 Bastion host
+#---------------------------------------------
+
+  EC2BastionHost1:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-003634241a8fcdec0
+      InstanceType: !FindInMap
+        - DefaultConfiguration
+        - MachineConfiguration
+        - EC2InstanceType
+      KeyName: !Sub ${BastionSSH}
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          apt-get update -y
+          apt-get install unzip awscli -y
+          cd /home/ubuntu
+          aws s3 cp s3://${SSHStore}/${BastionSSH}.pem /home/ubuntu
+          chmod 400 ${BastionSSH}.pem
+      SubnetId:
+        Fn::ImportValue: !Sub "${UdaApp}-Pubsubnet1"
+      SecurityGroupIds:
+        - Ref: BastionSG
+      IamInstanceProfile: !Ref BastionIamInstanceProfile
+      Tags:
+        - Key: Name
+          Value: Bastionhost1
+
+
+  EC2BastionHost2:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-003634241a8fcdec0
+      InstanceType: !FindInMap
+        - DefaultConfiguration
+        - MachineConfiguration
+        - EC2InstanceType
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          apt-get update -y
+          apt-get install unzip awscli -y
+          cd /home/ubuntu
+          aws s3 cp s3://${SSHStore}/${BastionSSH}.pem /home/ubuntu
+          chmod 400 ${BastionSSH}.pem
+      KeyName: !Sub ${BastionSSH}
+      SubnetId:
+        Fn::ImportValue: !Sub "${UdaApp}-Pubsubnet2"
+      SecurityGroupIds:
+        - Ref: BastionSG
+      IamInstanceProfile: !Ref BastionIamInstanceProfile
+      Tags:
+        - Key: Name
+          Value: Bastionhost2
+
+
+#--------------------------------------------------------------------
+# S3 Bucket Configuration for the Key Management
+#--------------------------------------------------------------------
+  Keymgmt:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: soniclabs6757
+      AccessControl: Private
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: error.html
+    DeletionPolicy: Retain
+
+  KeymgmtPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref Keymgmt
+      PolicyDocument:
+        Statement:
+          - Sid: AllowStaticObjectDownload
+            Action: s3:GetObject
+            Effect: Allow
+            Resource: !Join ["", ["arn:aws:s3:::", !Ref "Keymgmt", "/*"]]
+            Principal:
+              AWS: "*"
+          - Sid: PutObjectAccess
+            Action: s3:PutObject
+            Effect: Allow
+            Resource: !Join ["", ["arn:aws:s3:::", !Ref "Keymgmt", "/*"]]
+            Principal:
+              AWS: "*"
+#---------------------------------------------
+# Elastic  IP
+#---------------------------------------------
+  EIP1:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain:
+        Fn::ImportValue: !Sub "${UdaApp}-VPCID"
+
+  EIPAssociation1:
+    Type: AWS::EC2::EIPAssociation
+    DependsOn:
+      - EC2BastionHost1
+      - EIP1
+    Properties:
+      InstanceId:
+        Ref: EC2BastionHost1
+      AllocationId:
+        Fn::GetAtt:
+          - EIP1
+          - AllocationId
+
+
+  EIP2:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain:
+        Fn::ImportValue: !Sub "${UdaApp}-VPCID"
+
+  EIPAssociation2:
+    Type: AWS::EC2::EIPAssociation
+    DependsOn:
+      - EC2BastionHost2
+      - EIP2
+    Properties:
+      InstanceId:
+        Ref: EC2BastionHost2
+      AllocationId:
+        Fn::GetAtt:
+           - EIP2
+           - AllocationId
+
+
+#-----------------------
+# Output
+#-----------------------
+Outputs:
+
+  CIDREC2BastionHost1:
+    Description: The CIDR of Bastion Host 1
+    Value: !Join ["", [!GetAtt EC2BastionHost1.PrivateIp, !Sub "/32"]]
+    Export:
+      Name: !Sub ${UdaApp}-EC2BastionHost1-CIDR
+
+  CIDREC2BastionHost2:
+    Description: The CIDR to the Bastion Host 2
+    Value: !Join ["", [!GetAtt EC2BastionHost2.PrivateIp, !Sub "/32"]]
+    Export:
+      Name: !Sub ${UdaApp}-EC2BastionHost2-CIDR
+
+  Keymgmts:
+    Value: !GetAtt [Keymgmt, WebsiteURL]
+    Description: URL for keys for bastion host
+
+  KeymgmtsURL:
+    Value: !Join ["", ["https://", !GetAtt [Keymgmt, DomainName]]]
+    Description: Secure URL to access the key for bastion host
+
+  BastionSSH:
+    Description: SSH Key Name
+    Value: !Sub ${BastionSSH}
+    Export:
+      Name: !Sub ${UdaApp}-BASTION-KEY

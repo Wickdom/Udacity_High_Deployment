@@ -1,0 +1,15 @@
+[
+  {
+    "ParameterKey": "UdaApp",
+    "ParameterValue": "Zesus"
+  },
+  {
+    "ParameterKey": "SSHStore",
+    "ParameterValue": "bastionkeys"
+  },
+  {
+    "ParameterKey": "BastionSSH",
+    "ParameterValue": "jumpbox"
+  }
+
+]
